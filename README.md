@@ -17,7 +17,7 @@ pip install databubble[notebook]  # adds ipython, for inline chart rendering
 ```
 
 (Installing straight from GitHub also still works, if you want an
-unreleased commit: `pip install git+https://github.com/sss828412/databubble-python.git`,
+unreleased commit: `pip install git+https://github.com/databubble-ai/databubble-python.git`,
 or `pip install -e .` for local development.)
 
 ## Quick start

@@ -46,7 +46,7 @@ config for the first time.
    `python -m build` produces from that field.
 2. **Configure the Trusted Publisher.** On the PyPI project's
    "Publishing" settings, add a new trusted publisher:
-   - Owner: `sss828412`
+   - Owner: `databubble-ai`
    - Repository: `databubble-python`
    - Workflow filename: `publish.yml`
    - Environment name: `pypi`
