@@ -42,13 +42,13 @@ DISPATCH_FILE = CODE_REPO / "skills" / "dispatch.py"
 SDK_JOURNEYS = SDK_ROOT / "databubble" / "journeys.py"
 SDK_SKILLS = SDK_ROOT / "databubble" / "skills.py"
 
-ROUTE_RE = re.compile(r'@journeys_router\.post\("/journeys/([a-z_]+)"\)')
+ROUTE_RE = re.compile(r'@journeys_router\.post\("/journeys/([a-z_]+)"')
 REGISTRY_RE = re.compile(r'^\s*"([a-z_]+)":\s*_run_[a-z_]+,\s*$', re.MULTILINE)
 SDK_JOURNEY_RE = re.compile(r'self\._call\("([a-z_]+)"')
-SDK_SKILL_RE = re.compile(r'self\._call\("([a-z_]+)"')
-
-# SDK method name -> server slug, where they deliberately differ.
-SKILL_ALIASES = {"bivariate": "bivariate_ts", "correlation": "correlation"}
+# Matches both self._call("slug", ...) and self._call_first_output("slug", ...)
+# — bivariate() uses the latter (skills/skills.py:_parse_skill_result_first_output)
+# since bivariate_ts always returns an outputs[] list server-side.
+SDK_SKILL_RE = re.compile(r'self\._call(?:_first_output)?\("([a-z_]+)"')
 
 
 def _server_surface() -> tuple[set[str], set[str], str]:
@@ -99,10 +99,7 @@ def main() -> int:
     status |= _report("journeys", journeys, wrapped_journeys)
 
     if skills:
-        wrapped_skills = {
-            SKILL_ALIASES.get(name, name)
-            for name in SDK_SKILL_RE.findall(SDK_SKILLS.read_text())
-        }
+        wrapped_skills = set(SDK_SKILL_RE.findall(SDK_SKILLS.read_text()))
         status |= _report("skills", skills, wrapped_skills)
     else:
         print("SKIP: no skill registry found to compare.")

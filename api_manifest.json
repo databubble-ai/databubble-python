@@ -1,22 +1,37 @@
 {
-  "_comment": "Machine-readable snapshot of the platform's public analysis surface. Regenerate with scripts/export_api_manifest.py in the app repo (Track B, task B4) and commit the result here. scripts/check_drift.py diffs the SDK against it on every PR.",
-  "generated_from": "api/routes/journeys.py + skills/dispatch.py",
-  "generated_at": "2026-08-18",
   "journeys": [
-    "elasticity", "driver", "segmentation", "time_series", "classification",
-    "ab_test", "clv", "predictive_model", "latent_factors", "causal_inference",
-    "spc_monitoring", "forecast_inventory", "churn_clv_at_risk", "mmm",
-    "pay_equity", "cross_price", "intervention_lift"
+    "ab_test",
+    "causal_inference",
+    "churn_clv_at_risk",
+    "classification",
+    "clv",
+    "cross_price",
+    "driver",
+    "elasticity",
+    "forecast_inventory",
+    "intervention_lift",
+    "latent_factors",
+    "mmm",
+    "pay_equity",
+    "predictive_model",
+    "segmentation",
+    "spc_monitoring",
+    "time_series"
   ],
   "skills": [
-    "univariate", "outliers", "missing_values", "leakage",
-    "bivariate_ts", "transformations", "correlation"
-  ],
-  "tier_journey_access": {
-    "developer": [],
-    "pro": "all",
-    "business": "all",
-    "enterprise": "all",
-    "demo": ["elasticity", "driver", "segmentation", "time_series"]
-  }
+    "bivariate_ts",
+    "confounding_remedy",
+    "correlation",
+    "data_quality",
+    "leakage",
+    "linear_regression",
+    "missing_values",
+    "nonlinearity",
+    "oaxaca",
+    "oaxaca_detailed",
+    "oaxaca_yun_normalized",
+    "outliers",
+    "transformations",
+    "univariate"
+  ]
 }

@@ -187,11 +187,19 @@ def test_bivariate_dataframe(db, sample_df):
     result = db.skills.bivariate(sample_df, x="price", y="sales")
     assert isinstance(result, SkillResult)
 
-    payload = db._http.post_json.call_args[0][1]
+    path, payload = db._http.post_json.call_args[0]
+    # There is no "bivariate" skill slug server-side — only "bivariate_ts",
+    # dispatched by mode=. Found 2026-09-06: this previously posted to
+    # /v1/skills/bivariate, which 404'd every real call.
+    assert path == "/v1/skills/bivariate_ts"
     assert "price" in payload["columns"]
     assert "sales" in payload["columns"]
-    assert payload["params"]["x"] == "price"
-    assert payload["params"]["y"] == "sales"
+    # Flat, top-level keys — api/routes/skill.py passes the request body
+    # straight through as params, so a nested "params": {...} sub-object
+    # (the previous shape here) is invisible server-side.
+    assert payload["column"] == "price"
+    assert payload["columns_2"] == ["sales"]
+    assert payload["mode"] == "bivariate"
 
 
 # ---------------------------------------------------------------------------

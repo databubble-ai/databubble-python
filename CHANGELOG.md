@@ -7,6 +7,37 @@ every diff. Add an entry here as part of each PR, in the same PR.
 
 Format: date, branch/PR, one or two lines on what changed and why.
 
+## 2026-09-06 — 0.7.0: fix 4 broken skill methods, add 7 missing ones
+
+`scripts/check_drift.py`'s manifest mode was comparing against `api_manifest.json`
+from 2026-08-18 — three weeks and 129 app commits stale — so it kept reporting
+clean while real drift accumulated silently. Running it in sibling-checkout
+mode against a live app checkout instead found two separate problems:
+
+1. **`leakage()`, `bivariate()`, `correlation()`, and `transformations()` were
+   broken against the real API.** `api/routes/skill.py` passes the whole
+   request body straight through as the dispatch layer's params dict — there
+   is no nested `"params": {...}` sub-object it unwraps — but all four
+   methods sent their skill-specific args nested that way. Confirmed by
+   calling the server's own dispatch functions directly: the nested shape
+   raises `'outcome' is required` (etc.) every time; the flat shape works.
+   `bivariate()` was also posting to `/v1/skills/bivariate`, which doesn't
+   exist server-side (only `bivariate_ts`, mode-dispatched) — a 404 on every
+   call — and using `x`/`y` params the dispatch layer never reads at all
+   (it wants `column`/`columns_2`). Fixed all four; verified end-to-end by
+   running each SDK method's built payload straight through the actual
+   `skills.dispatch` functions (not just re-checking the drift manifest).
+2. **7 registered skills had no SDK method at all**: `data_quality`,
+   `nonlinearity`, `linear_regression`, `confounding_remedy`, `oaxaca`,
+   `oaxaca_detailed`, `oaxaca_yun_normalized`. Added all seven, matching
+   `skills/dispatch.py`'s actual required/optional params exactly.
+
+Also fixed `check_drift.py` itself: its journey-route regex assumed
+`@journeys_router.post("/journeys/x")` with nothing else inside the parens,
+so it stopped matching anything once the Phase 3 typed-`response_model`
+work added a second argument to every route decorator — a false "17 missing
+journeys" alarm with zero real drift behind it.
+
 ## 2026-08-29 — 0.6.1: pin the mlflow extra to a real dependency
 
 `[mlflow]`'s dependency on `databubble-scoring[mlflow]` was unpinned (no version constraint at

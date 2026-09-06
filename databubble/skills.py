@@ -94,6 +94,25 @@ def _parse_skill_result(response: dict, http=None) -> SkillResult:
     )
 
 
+def _parse_skill_result_first_output(response: dict, http=None) -> SkillResult:
+    """Like _parse_skill_result, but for the `outputs[]` envelope shape.
+
+    api/routes/skill.py returns `outputs: [...]` instead of `result: {...}`
+    whenever the underlying skill function returns a list — which
+    bivariate_ts always does server-side (one entry per Column-2 selection),
+    even when the SDK only ever asks for one. This unwraps that single
+    entry so callers still get one SkillResult back, matching bivariate()'s
+    existing return type.
+    """
+    outputs = response.get("outputs")
+    if outputs:
+        return _parse_skill_result(
+            {"result": outputs[0], "_meta": response.get("_meta", {}), "n_rows": response.get("n_rows")},
+            http=http,
+        )
+    return _parse_skill_result(response, http=http)
+
+
 class SkillsClient:
     def __init__(self, http_client):
         self._http = http_client   # injected from DataBubble root client
@@ -101,6 +120,10 @@ class SkillsClient:
     def _call(self, skill_name: str, payload: dict) -> SkillResult:
         response = self._http.post_json(f"/v1/skills/{skill_name}", payload)
         return _parse_skill_result(response, http=self._http)
+
+    def _call_first_output(self, skill_name: str, payload: dict) -> SkillResult:
+        response = self._http.post_json(f"/v1/skills/{skill_name}", payload)
+        return _parse_skill_result_first_output(response, http=self._http)
 
     # -----------------------------------------------------------------------
     # Single-column skills
@@ -173,7 +196,12 @@ class SkillsClient:
                 f"One of: {', '.join(SkillsClient.TRANSFORMS)}"
             )
         payload = _resolve_single_column(data, column, skill="transformations")
-        payload["params"] = {**payload.get("params", {}), "transform": transform}
+        # Flat, top-level key — api/routes/skill.py passes the whole request
+        # body straight through as params (`params_dict = body`), so a
+        # nested "params": {...} sub-object is invisible server-side and
+        # this call would 422 with "'transform' is required" every time.
+        # Found 2026-09-06 auditing the SDK against the live dispatch layer.
+        payload["transform"] = transform
         return self._call("transformations", payload)
 
     # -----------------------------------------------------------------------
@@ -208,9 +236,11 @@ class SkillsClient:
                 f"outcome='{outcome}' not found in DataFrame columns: {list(df.columns)}"
             )
         predictor_cols = [c for c in df.columns if c != outcome]
+        # Flat, top-level keys — see the note in transformations() above.
         payload = {
             **_df_to_payload(df, list(df.columns)),
-            "params": {"outcome": outcome, "predictor_cols": predictor_cols},
+            "outcome": outcome,
+            "predictor_cols": predictor_cols,
         }
         return self._call("leakage", payload)
 
@@ -235,8 +265,18 @@ class SkillsClient:
             y:    Column name for y variable (outcome)
             y_series: pd.Series for y when data is a Series for x
         """
-        payload = _resolve_two_columns(data, x, y, y_series, skill="bivariate")
-        return self._call("bivariate", payload)
+        payload, x_name, y_name = _resolve_two_columns(data, x, y, y_series, skill="bivariate")
+        # Server-side there is no "bivariate" skill slug — only "bivariate_ts",
+        # which dispatches on mode= to either the bivariate or timeseries path
+        # (skills/dispatch.py:_run_bivariate_or_ts). It also always returns a
+        # list (one entry per Column-2 selection) even for the single column
+        # this method sends, hence _call_first_output instead of _call.
+        # Found 2026-09-06: this method previously posted to /v1/skills/bivariate
+        # directly, which 404'd every time — "Unknown skill: 'bivariate'".
+        payload["column"] = x_name
+        payload["columns_2"] = [y_name]
+        payload["mode"] = "bivariate"
+        return self._call_first_output("bivariate_ts", payload)
 
     def correlation(
         self,
@@ -255,8 +295,233 @@ class SkillsClient:
             y:    Column name for y variable
             y_series: pd.Series for y when data is a Series for x
         """
-        payload = _resolve_two_columns(data, x, y, y_series, skill="correlation")
+        payload, x_name, y_name = _resolve_two_columns(data, x, y, y_series, skill="correlation")
+        # skills/dispatch.py:_run_correlation reads outcome/predictor_cols,
+        # not x/y — it computes y's correlation against each predictor.
+        payload["outcome"] = y_name
+        payload["predictor_cols"] = [x_name]
         return self._call("correlation", payload)
+
+    # -----------------------------------------------------------------------
+    # Whole-dataset / multi-column skills, added 2026-09-06 — these had no
+    # SDK wrapper at all (scripts/check_drift.py against a live app
+    # checkout found 7 registered skills with no corresponding method here).
+    # -----------------------------------------------------------------------
+
+    def data_quality(
+        self,
+        df,
+        data_grain: Optional[str] = None,
+        data_grain_column: Optional[str] = None,
+    ) -> SkillResult:
+        """
+        Duplication and grain check — exact whole-row duplicates, repeats of
+        a stated grain column, and candidate-key near-misses. Run this
+        first: duplicated rows silently contaminate every statistic that
+        follows.
+
+        Args:
+            df:                pd.DataFrame — all columns profiled.
+            data_grain:        Optional. What one row is supposed to represent.
+            data_grain_column: Optional. Column(s) that should be unique per data_grain.
+        """
+        _require_dataframe(df, skill="data_quality")
+        payload = _multicol_payload(
+            df, list(df.columns),
+            data_grain=data_grain, data_grain_column=data_grain_column,
+        )
+        return self._call("data_quality", payload)
+
+    def nonlinearity(
+        self,
+        data,
+        column: Optional[str] = None,
+        outcome: Optional[str] = None,
+        y_series=None,
+    ) -> SkillResult:
+        """
+        Functional-form check between a predictor and an outcome — is the
+        relationship linear, or does it need a transform first (see
+        transformations())?
+
+        Args:
+            data:     pd.DataFrame (requires column= and outcome=) or pd.Series for column
+            column:   Predictor column name.
+            outcome:  Outcome column name.
+            y_series: pd.Series for outcome when data is a Series for column.
+        """
+        payload, x_name, y_name = _resolve_two_columns(data, column, outcome, y_series, skill="nonlinearity")
+        payload["column"] = x_name
+        payload["outcome"] = y_name
+        return self._call("nonlinearity", payload)
+
+    def linear_regression(
+        self,
+        df,
+        outcome: str,
+        predictor_cols: list[str],
+        log_transformed: bool = False,
+        log_x_transformed: bool = True,
+    ) -> SkillResult:
+        """
+        OLS regression via statsmodels — canonical prerequisite for oaxaca()
+        and confounding_remedy().
+
+        Args:
+            df:                 pd.DataFrame
+            outcome:            Outcome column name.
+            predictor_cols:     One or more predictor column names.
+            log_transformed:    Whether `outcome` is already log-transformed
+                                 (changes coefficient wording, e.g. elasticity).
+            log_x_transformed:  Whether predictors are already log-transformed.
+        """
+        _require_dataframe(df, skill="linear_regression")
+        if outcome not in df.columns:
+            raise SDKUsageError(f"outcome='{outcome}' not found in DataFrame columns: {list(df.columns)}")
+        missing = [c for c in predictor_cols if c not in df.columns]
+        if missing:
+            raise SDKUsageError(f"predictor_cols not found in DataFrame: {missing}")
+        payload = _multicol_payload(
+            df, [outcome, *predictor_cols],
+            outcome=outcome, predictor_cols=predictor_cols,
+            log_transformed=log_transformed, log_x_transformed=log_x_transformed,
+        )
+        return self._call("linear_regression", payload)
+
+    def confounding_remedy(
+        self,
+        df,
+        outcome: str,
+        focal_col: str,
+        remedy: str,
+        period_col: str,
+        other_predictors: Optional[list[str]] = None,
+        drop_period_values: Optional[list] = None,
+        log_predictors: Optional[list[str]] = None,
+        log_outcome: bool = False,
+        expected_sign: str = "negative",
+        min_rows_after: int = 30,
+    ) -> SkillResult:
+        """
+        Adjusts a focal predictor's effect for a confound tied to a period
+        (e.g. a policy or seasonal change), via restriction or control.
+
+        Args:
+            df:                 pd.DataFrame
+            outcome:            Outcome column name.
+            focal_col:          The predictor whose effect you want, net of the confound.
+            remedy:             "period_restriction" or "period_control".
+            period_col:         Column identifying the confounded period.
+            other_predictors:   Additional predictors to include.
+            drop_period_values: Period values to exclude (period_restriction).
+            log_predictors:     Which predictor columns to log-transform.
+            log_outcome:        Whether to log-transform the outcome.
+            expected_sign:      "negative" or "positive" — the focal effect's expected direction.
+            min_rows_after:     Minimum rows required after any restriction.
+        """
+        _require_dataframe(df, skill="confounding_remedy")
+        other_predictors = other_predictors or []
+        needed = {outcome, focal_col, period_col, *other_predictors}
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise SDKUsageError(f"Columns not found in DataFrame: {sorted(missing)}")
+        payload = _multicol_payload(
+            df, sorted(needed),
+            outcome=outcome, focal_col=focal_col, remedy=remedy, period_col=period_col,
+            other_predictors=other_predictors, drop_period_values=drop_period_values,
+            log_predictors=log_predictors, log_outcome=log_outcome,
+            expected_sign=expected_sign, min_rows_after=min_rows_after,
+        )
+        return self._call("confounding_remedy", payload)
+
+    def _oaxaca_payload(
+        self,
+        skill_name: str,
+        df,
+        compensation_col: str,
+        protected_col: str,
+        factor_cols: list[str],
+        reference_group: Optional[str],
+        log_compensation: bool,
+        proxy_max_assoc: float,
+    ) -> dict:
+        _require_dataframe(df, skill=skill_name)
+        needed = {compensation_col, protected_col, *factor_cols}
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise SDKUsageError(f"Columns not found in DataFrame: {sorted(missing)}")
+        return _multicol_payload(
+            df, sorted(needed),
+            compensation_col=compensation_col, protected_col=protected_col, factor_cols=factor_cols,
+            reference_group=reference_group, log_compensation=log_compensation,
+            proxy_max_assoc=proxy_max_assoc,
+        )
+
+    def oaxaca(
+        self,
+        df,
+        compensation_col: str,
+        protected_col: str,
+        factor_cols: list[str],
+        reference_group: Optional[str] = None,
+        log_compensation: bool = True,
+        proxy_max_assoc: float = 0.90,
+    ) -> SkillResult:
+        """
+        Oaxaca-Blinder pay-gap decomposition: splits a compensation gap
+        between `protected_col` groups into the part "explained" by
+        `factor_cols` and the "unexplained" residual.
+
+        Args:
+            df:               pd.DataFrame
+            compensation_col: Outcome column (e.g. salary).
+            protected_col:    Group column (e.g. gender) — binary or multi-group.
+            factor_cols:      Legitimate explanatory factors (e.g. tenure, level).
+            reference_group:  Which group value is the reference. Defaults server-side.
+            log_compensation: Whether to log-transform compensation before decomposing.
+            proxy_max_assoc:  Max allowed association between a factor and protected_col
+                               before it's flagged as a likely proxy.
+        """
+        payload = self._oaxaca_payload(
+            "oaxaca", df, compensation_col, protected_col, factor_cols,
+            reference_group, log_compensation, proxy_max_assoc,
+        )
+        return self._call("oaxaca", payload)
+
+    def oaxaca_detailed(
+        self,
+        df,
+        compensation_col: str,
+        protected_col: str,
+        factor_cols: list[str],
+        reference_group: Optional[str] = None,
+        log_compensation: bool = True,
+        proxy_max_assoc: float = 0.90,
+    ) -> SkillResult:
+        """Like oaxaca(), with the explained component broken out per factor."""
+        payload = self._oaxaca_payload(
+            "oaxaca_detailed", df, compensation_col, protected_col, factor_cols,
+            reference_group, log_compensation, proxy_max_assoc,
+        )
+        return self._call("oaxaca_detailed", payload)
+
+    def oaxaca_yun_normalized(
+        self,
+        df,
+        compensation_col: str,
+        protected_col: str,
+        factor_cols: list[str],
+        reference_group: Optional[str] = None,
+        log_compensation: bool = True,
+        proxy_max_assoc: float = 0.90,
+    ) -> SkillResult:
+        """Like oaxaca_detailed(), with Yun's normalization so per-factor
+        contributions don't depend on category-reference-level choice."""
+        payload = self._oaxaca_payload(
+            "oaxaca_yun_normalized", df, compensation_col, protected_col, factor_cols,
+            reference_group, log_compensation, proxy_max_assoc,
+        )
+        return self._call("oaxaca_yun_normalized", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +570,32 @@ def _resolve_single_column(data, column: Optional[str], skill: str) -> dict:
     )
 
 
-def _resolve_two_columns(data, x, y, y_series, skill: str) -> dict:
+def _multicol_payload(df, columns: list[str], **extra_params) -> dict:
+    """
+    Build a multi-column payload with flat, top-level extra params.
+
+    api/routes/skill.py passes the whole request body straight through as
+    the dispatch layer's `params` dict — there is no nested "params"
+    sub-object it unwraps. So confounding_remedy/oaxaca/data_quality/etc.
+    all need their skill-specific args (outcome=, factor_cols=, ...) as
+    plain top-level keys alongside "columns"/"data", not nested.
+    """
+    return {**_df_to_payload(df, columns), **extra_params}
+
+
+def _resolve_two_columns(data, x, y, y_series, skill: str) -> tuple[dict, str, str]:
     """
     Resolve two-column input to a JSON payload dict.
 
     Accepts:
       - pd.DataFrame + x= + y=
       - pd.Series (as data) + pd.Series (as y_series)
+
+    Returns (payload, x_name, y_name) — the resolved names are returned
+    alongside the payload because each caller needs them under different
+    flat, skill-specific keys (bivariate wants column/columns_2, correlation
+    wants outcome/predictor_cols) rather than a generic "params": {x, y}
+    that api/routes/skill.py's dispatch layer never reads.
     """
     try:
         import pandas as pd
@@ -330,10 +614,7 @@ def _resolve_two_columns(data, x, y, y_series, skill: str) -> dict:
                     f"Column '{col}' not found in DataFrame. "
                     f"Available: {list(data.columns)}"
                 )
-        return {
-            **_df_to_payload(data, [x, y]),
-            "params": {"x": x, "y": y},
-        }
+        return _df_to_payload(data, [x, y]), x, y
 
     if isinstance(data, pd.Series):
         if y_series is None or not isinstance(y_series, pd.Series):
@@ -350,9 +631,8 @@ def _resolve_two_columns(data, x, y, y_series, skill: str) -> dict:
                 x_name: _series_to_payload(data, x_name)["data"],
                 y_name: _series_to_payload(y_series, y_name)["data"],
             },
-            "params": {"x": x_name, "y": y_name},
         }
-        return payload
+        return payload, x_name, y_name
 
     raise SDKUsageError(
         f"{skill}() expects a pd.DataFrame or pd.Series. Got {type(data).__name__}."

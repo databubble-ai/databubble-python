@@ -1,6 +1,6 @@
 # DataBubble SDK
 
-Statistical Intelligence as a Service. Current version: **0.6.1**.
+Statistical Intelligence as a Service. Current version: **0.7.0**.
 
 A thin, typed client over the DataBubble HTTP API (`/v1/*`) — handles
 authentication (`X-API-Key`), request/response shaping, and session memory.

@@ -5,4 +5,4 @@ Kept in its own module so client.py can stamp a User-Agent without importing
 the package root (circular import).
 """
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
