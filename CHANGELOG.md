@@ -7,6 +7,46 @@ every diff. Add an entry here as part of each PR, in the same PR.
 
 Format: date, branch/PR, one or two lines on what changed and why.
 
+## 2026-09-08 — 0.8.0: close the 15-route SDK gap (DEF-0030)
+
+An independent audit of the app repo's full route table against this SDK's
+surface (`docs/context/deferred_items.yaml` DEF-0030 in the platform repo)
+found 15 live routes with zero SDK reach — real, standalone analytical
+operations, not the interactive session/workbench surface, which is
+correctly out of scope for a stateless client. Added:
+
+- **`db.analysis`** (new client): `.eda()`, `.pulse()`, `.scope()`,
+  `.power_plan()`, `.export_skill_pack()`, `.correlation_export()`,
+  `.forecast_export()` — `EDAResult`/`PulseResult` gain `.export_pdf()`.
+- **`db.qa_audit`** (new client): `.extract()`, `.diff()`, `.export()` —
+  "Compare with my analysis" (business/enterprise tier).
+- **`db.model.interval_calibration()`** — the one `model_export.py` route
+  `db.model` didn't wrap; same arg shape as `.predict()`, same return shape
+  as `db.skills.*` (the platform route wraps the same `SkillOutput`-shaped
+  helper).
+- **`JourneyResult.export_pdf()` / `.export_exec_summary_pdf()`** —
+  `POST /v1/export/journey{,/exec-summary}` render a Mode 2 (guided-session)
+  dict (`journey_type`/`outcome`/`steps`/`final_output`/`brief`), and this
+  SDK is Mode 1 (stateless) only. `JourneyResult._session_view()` reshapes
+  the envelope's already-flat fields into that shape — `final_output`'s
+  fields are already flat on `JourneyResponseEnvelope`, so nothing is
+  invented; `brief` (business_problem/decision_at_stake) is sent empty since
+  Mode 1 never collects it, and the renderer already treats it as optional.
+- `_HTTPClient.post_bytes()` — the POST-with-a-body counterpart to the
+  existing GET-only `get_bytes()`, for the PDF/CSV/ZIP-returning routes above.
+
+Verified end-to-end, not just against mocked tests: every new method's real
+request payload was built via a transport recorder and replayed against a
+live platform `TestClient` (`DATABUBBLE_AUTH_DISABLED=true`) — 20/22 checks
+passed, including the journey-PDF reshaping producing real PDF bytes on the
+first live request. The 2 that didn't were `correlation_export()` against an
+`elasticity()`/`driver()` result — not an SDK defect: `correlation_export_ref`
+turns out to be structurally unreachable from the direct `/v1/journeys/*`
+routes today (only the separate `/v1/analyse` intake-routed path populates
+it — `api/routes/journey.py:225` vs. `api/routes/journeys.py`, which never
+copies it onto the envelope). Filed as a platform-repo fix, not worked
+around here — the ref genuinely isn't there to send.
+
 ## 2026-09-06 — 0.7.0: fix 4 broken skill methods, add 7 missing ones
 
 `scripts/check_drift.py`'s manifest mode was comparing against `api_manifest.json`

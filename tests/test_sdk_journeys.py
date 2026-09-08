@@ -739,3 +739,78 @@ def test_intervention_lift_invalid_design_raises(intervention_df):
             intervention_df, date_col="day", value_col="conversions",
             intervention_date="2026-01-15", design="nonsense",
         )
+
+
+# ---------------------------------------------------------------------------
+# JourneyResult.export_pdf() / .export_exec_summary_pdf() (0.8.0 — DEF-0030)
+#
+# POST /v1/export/journey and .../exec-summary render a Mode 2 guided-session
+# dict (journey_type/outcome/steps/final_output/brief). This SDK is Mode 1
+# only, so JourneyResult._session_view() reshapes the envelope's already-flat
+# fields into that shape — see models.py for the field-by-field mapping.
+# ---------------------------------------------------------------------------
+
+def _elasticity_response_for_pdf():
+    return {
+        "status": "ok", "journey_type": "elasticity",
+        "result": {
+            "halted": False, "halt_reason": None,
+            "plain_english_summary": "A 1% price increase is associated with a 0.85% drop in sales.",
+            "warnings": ["Sample size is modest (n=35)."],
+            "assumptions_met": True,
+            "steps": [{"display_name": "Univariate: price", "node": "univariate_price", "halted": False}],
+            "primary_estimate": -0.85, "primary_estimate_caveat": None,
+            "primary_label": "Price elasticity of demand", "ci_lower": -1.1, "ci_upper": -0.6,
+            "causal_limitation": "Observational data — not a randomized experiment.",
+            "outcome": "sales",
+        },
+        "_meta": {"tier": "business", "key_prefix": "dbk_test12"},
+    }
+
+
+def test_journey_export_pdf_reshapes_envelope_into_session(price_sales_df):
+    http = MagicMock()
+    http.post_json.return_value = _elasticity_response_for_pdf()
+    http.post_bytes.return_value = b"%PDF-1.4 fake"
+    client = _make_client(http)
+
+    result = client.journeys.elasticity(price_sales_df, price_col="price", sales_col="sales")
+    pdf = result.export_pdf()
+
+    assert pdf == b"%PDF-1.4 fake"
+    http.post_bytes.assert_called_once()
+    called_path, called_payload = http.post_bytes.call_args[0]
+    assert called_path == "/v1/export/journey"
+    session = called_payload["session"]
+    assert session["journey_type"] == "elasticity"
+    assert session["outcome"] == "sales"
+    assert session["steps"] == [{"display_name": "Univariate: price", "node": "univariate_price", "halted": False}]
+    assert session["final_output"]["primary_estimate"] == -0.85
+    assert session["final_output"]["plain_english_summary"] == "A 1% price increase is associated with a 0.85% drop in sales."
+    assert session["brief"] == {}  # Mode 1 never collects business_problem/decision_at_stake
+
+
+def test_journey_export_exec_summary_pdf(price_sales_df):
+    http = MagicMock()
+    http.post_json.return_value = _elasticity_response_for_pdf()
+    http.post_bytes.return_value = b"%PDF-1.4 exec summary"
+    client = _make_client(http)
+
+    result = client.journeys.elasticity(price_sales_df, price_col="price", sales_col="sales")
+    pdf = result.export_exec_summary_pdf()
+
+    assert pdf == b"%PDF-1.4 exec summary"
+    called_path = http.post_bytes.call_args[0][0]
+    assert called_path == "/v1/export/journey/exec-summary"
+
+
+def test_journey_export_pdf_without_http_raises():
+    """A JourneyResult built by hand (no _http, e.g. reloaded from a saved
+    dict) can't export a PDF — needs a live client to make the request."""
+    result = JourneyResult(
+        journey_type="elasticity", halted=False, halt_reason=None, primary_estimate=None,
+        plain_english_summary="", warnings=[], assumptions_met=True,
+        raw={"result": {}},
+    )
+    with pytest.raises(SDKUsageError, match="export_pdf"):
+        result.export_pdf()

@@ -524,6 +524,63 @@ class JourneyResult:
         merged.update({k: v for k, v in self.raw.items() if k.startswith("chart") or k == "charts"})
         return from_response(merged, http=self._http)
 
+    # -- PDF export ---------------------------------------------------------
+    def _session_view(self) -> dict:
+        """
+        POST /v1/export/journey and /v1/export/journey/exec-summary render a
+        Mode 2 (guided-session) dict: journey_type/outcome/steps/final_output/
+        brief (api/routes/export.py + api/export/journey_pdf.py in the
+        platform repo). This SDK is Mode 1 (stateless) only and never has a
+        live session object — but every `final_output` field the renderer
+        reads is already flat on this JourneyResponseEnvelope (api/envelope.py),
+        because Mode 1 (journeys/journey_run.py) populates the same fields
+        Mode 2's build_final_output() does. `brief` (business_problem /
+        decision_at_stake) is the one thing genuinely absent — Mode 1 never
+        collects free-text framing from the caller — so it's sent empty;
+        the renderer already treats it as optional. This is a faithful
+        re-shaping of data this result already has, not invented content.
+        """
+        result = self.result
+        final_output = {
+            k: result.get(k) for k in (
+                "plain_english_summary", "primary_estimate", "primary_estimate_caveat",
+                "primary_label", "ci_lower", "ci_upper", "assumptions_met",
+                "causal_limitation", "warnings", "halted", "halt_reason",
+            )
+        }
+        return {
+            "journey_type": self.journey_type,
+            "outcome": result.get("outcome", ""),
+            "steps": result.get("steps", []),
+            "final_output": final_output,
+            "brief": {},
+        }
+
+    def export_pdf(self) -> bytes:
+        """
+        Render this journey as a full walkthrough PDF — POST /v1/export/journey.
+
+        Example:
+            result = db.journeys.elasticity(df, price_col="price", sales_col="sales")
+            with open("elasticity.pdf", "wb") as f:
+                f.write(result.export_pdf())
+
+        See JourneyResult._session_view() for how a Mode 1 (stateless) result
+        is reshaped into the session dict this route expects.
+        """
+        if self._http is None:
+            raise SDKUsageError("export_pdf() requires a JourneyResult returned by db.journeys.*().")
+        return self._http.post_bytes("/v1/export/journey", {"session": self._session_view()})
+
+    def export_exec_summary_pdf(self) -> bytes:
+        """
+        Render a one-page, decision-first summary PDF (no methodology, no
+        step-by-step) — POST /v1/export/journey/exec-summary.
+        """
+        if self._http is None:
+            raise SDKUsageError("export_exec_summary_pdf() requires a JourneyResult returned by db.journeys.*().")
+        return self._http.post_bytes("/v1/export/journey/exec-summary", {"session": self._session_view()})
+
     # -- gates ------------------------------------------------------------
     def is_reliable(self) -> bool:
         """True when the journey completed and assumptions were not violated."""
@@ -921,3 +978,309 @@ class SegmentScoreResult:
 
     def __repr__(self) -> str:
         return f"SegmentScoreResult(n_scored={self.n_scored}, distribution={self.segment_distribution})"
+
+
+# ---------------------------------------------------------------------------
+# db.analysis / db.qa_audit — standalone analytical operations (0.8.0)
+#
+# Not skills (no session, no SKILL_REGISTRY entry), not journeys (no graph,
+# no tier-gated multi-step orchestration), not a portable scoring artifact.
+# Each of these wraps one of the platform routes that had no SDK method at
+# all before 0.8.0 — see DEF-0030 in the platform repo's
+# docs/context/deferred_items.yaml for the inventory this closes.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EDAResult:
+    """
+    Return type for db.analysis.eda() — POST /v1/eda.
+
+    Attributes:
+        n_rows, n_cols        Shape of the analysed frame.
+        n_flagged_columns     Columns with at least one data-quality flag.
+        n_critical_flags      Flags severe enough to block downstream analysis.
+        summary                Token-efficient one-line summary (LLM-facing).
+        plain_english_summary  Longer narrative from the report itself.
+        warnings                List of warning strings.
+        chapter_ref             Knowledge-base chapter reference.
+        raw                      Full API response — report.column_profiles,
+                                  .critical_flags, .top_relationships,
+                                  .journey_recommendations, .data_quality, etc.
+    """
+    n_rows: int
+    n_cols: int
+    n_flagged_columns: int
+    n_critical_flags: int
+    summary: str
+    warnings: list[str] = field(default_factory=list)
+    chapter_ref: str = ""
+    raw: dict = field(default_factory=dict)
+    _http: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def report(self) -> dict:
+        """The full EDAReport dict."""
+        return self.raw.get("report") or {}
+
+    @property
+    def plain_english_summary(self) -> str:
+        return self.report.get("plain_english_summary", "")
+
+    def export_pdf(self) -> bytes:
+        """Render this report as a PDF — POST /v1/export/eda."""
+        if self._http is None:
+            raise SDKUsageError("export_pdf() requires an EDAResult returned by db.analysis.eda().")
+        return self._http.post_bytes("/v1/export/eda", {"eda": self.report})
+
+    def __repr__(self) -> str:
+        return (f"EDAResult({self.n_rows} rows x {self.n_cols} cols, "
+                f"{self.n_flagged_columns} flagged, {self.n_critical_flags} critical)")
+
+
+@dataclass
+class PulseResult:
+    """
+    Return type for db.analysis.pulse() — POST /v1/pulse ("Pulse of Data").
+
+    Attributes:
+        n_rollups   Number of roll-up grains resolved and profiled.
+        deferred    What Pulse could NOT do (distinct from caveats below).
+        notes       Free-text notes from the profiling run.
+        caveats     Standing interpretation warnings (ecological fallacy /
+                    Simpson's paradox etc.) that apply to results Pulse DID
+                    produce — render these wherever the roll-up results are.
+        raw         Full API response — report.rollups, report.raw_eda, etc.
+    """
+    n_rollups: int
+    deferred: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    caveats: list[str] = field(default_factory=list)
+    raw: dict = field(default_factory=dict)
+    _http: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def report(self) -> dict:
+        """The full PulseReport dict."""
+        return self.raw.get("report") or {}
+
+    @property
+    def rollups(self):
+        """Roll-up profiles as a DataFrame — one row per resolved grain (empty if n_rollups == 0)."""
+        from databubble.tables import rows_to_frame
+
+        return rows_to_frame(self.report.get("rollups"))
+
+    def export_pdf(self) -> bytes:
+        """Render this report as a PDF — POST /v1/export/pulse."""
+        if self._http is None:
+            raise SDKUsageError("export_pdf() requires a PulseResult returned by db.analysis.pulse().")
+        return self._http.post_bytes("/v1/export/pulse", {"pulse": self.report})
+
+    def __repr__(self) -> str:
+        return f"PulseResult({self.n_rollups} roll-ups, {len(self.deferred)} deferred)"
+
+
+@dataclass
+class ScopeResult:
+    """
+    Return type for db.analysis.scope() — POST /v1/scope. An advisory
+    pre-flight, not a skill or journey: a small sample + a free-text question
+    in, a recommendation for how to get an analysis-ready table out.
+
+    Attributes:
+        regime                    Classified data regime.
+        journey_candidates         Journey types this data plausibly supports.
+        recommended_grain          Suggested roll-up grain, if any.
+        recommended_sample_rows    Suggested sample size for full ingestion.
+        rationale                  Plain-English explanation of the recommendation.
+        blocking                   True if this is an out-of-scope verdict, not
+                                    just advice — still a 200, not an error.
+        raw                        Full API response.
+    """
+    regime: str
+    journey_candidates: list[str]
+    rationale: str
+    blocking: bool
+    recommended_grain: Optional[str] = None
+    recommended_sample_rows: Optional[int] = None
+    raw: dict = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        return f"ScopeResult(regime='{self.regime}', blocking={self.blocking})"
+
+
+@dataclass
+class PowerPlanResult:
+    """
+    Return type for db.analysis.power_plan() — POST /v1/power/plan.
+    Stateless sample-size / detectable-effect planning, no dataset involved.
+    Shape depends on mode: "sample_size" -> n_per_group/n_total; the same
+    request answered inverted ("detectable_effect") -> mde_absolute instead.
+    Both are on .raw regardless of mode; only interpretation is common to both.
+
+    Attributes:
+        interpretation   Plain-English statement of the result.
+        raw               Full response — n_total/n_per_group (sample_size mode)
+                          or mde_absolute/mde_relative (detectable_effect mode),
+                          plus effect_size, alpha, power_target, alternative.
+    """
+    interpretation: str
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def n_total(self) -> Optional[int]:
+        """sample_size mode only — None for detectable_effect mode."""
+        return self.raw.get("n_total")
+
+    @property
+    def mde_absolute(self) -> Optional[float]:
+        """detectable_effect mode only — None for sample_size mode."""
+        return self.raw.get("mde_absolute")
+
+    def __repr__(self) -> str:
+        return f"PowerPlanResult({self.interpretation})"
+
+
+@dataclass
+class SkillPackResult:
+    """
+    Return type for db.analysis.export_skill_pack() — POST /v1/export/skill.
+    Profiles one uploaded dataset in isolation and renders it as a
+    downloadable Anthropic Agent Skill bundle (SKILL.md, profile.json,
+    UPDATING.md) — distinct from db.skills.* (which runs one statistical
+    check) and db.model/scorecard/segments (which export a fitted artifact).
+
+    Attributes:
+        skill_name       Slugified name for the bundle.
+        n_rows, n_columns Shape of the profiled dataset.
+        blocking_count    Count of blocking data-quality issues found.
+        raw               Full response — skill_md/profile_json/updating_md
+                          strings, read via .save() rather than by hand.
+    """
+    skill_name: str
+    n_rows: int
+    n_columns: int
+    blocking_count: int
+    raw: dict = field(default_factory=dict)
+
+    def save(self, directory: str) -> None:
+        """Write SKILL.md, profile.json and UPDATING.md into `directory`."""
+        import os
+
+        os.makedirs(directory, exist_ok=True)
+        files = {
+            "SKILL.md": self.raw.get("skill_md", ""),
+            "profile.json": self.raw.get("profile_json", ""),
+            "UPDATING.md": self.raw.get("updating_md", ""),
+        }
+        for name, content in files.items():
+            with open(os.path.join(directory, name), "w") as f:
+                f.write(content)
+        print(f"Skill pack '{self.skill_name}' saved to {directory}/")
+
+    def __repr__(self) -> str:
+        return f"SkillPackResult('{self.skill_name}', {self.n_rows}x{self.n_columns}, blocking={self.blocking_count})"
+
+
+@dataclass
+class CorrelationExportResult:
+    """
+    Return type for db.analysis.correlation_export(..., format="json").
+    format="csv"/"zip" return raw bytes instead (nothing further to wrap) —
+    see AnalysisClient.correlation_export()'s docstring.
+    """
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def outcome(self) -> str:
+        return (self.raw.get("result") or {}).get("outcome", "")
+
+    def save(self, path: str) -> None:
+        """Write the diagnostic JSON to disk."""
+        import json
+        with open(path, "w") as f:
+            json.dump(self.raw, f, indent=2)
+        print(f"Correlation diagnostic saved to {path}")
+
+    def __repr__(self) -> str:
+        return f"CorrelationExportResult(outcome='{self.outcome}')"
+
+
+@dataclass
+class ForecastExportResult:
+    """
+    Return type for db.analysis.forecast_export(..., format="json").
+    format="csv" returns raw bytes instead — see
+    AnalysisClient.forecast_export()'s docstring.
+    """
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def target(self) -> Optional[str]:
+        return self.raw.get("target")
+
+    def save(self, path: str) -> None:
+        """Write the forecast card JSON to disk."""
+        import json
+        with open(path, "w") as f:
+            json.dump(self.raw, f, indent=2)
+        print(f"Forecast card saved to {path}")
+
+    def __repr__(self) -> str:
+        return f"ForecastExportResult(target='{self.target}')"
+
+
+@dataclass
+class ExtractedClaimResult:
+    """
+    Return type for db.qa_audit.extract() — POST /v1/qa-audit/extract.
+    Normalized, diffable extraction from a pasted analysis or an uploaded
+    artifact (PDF/PPTX/DOCX/TXT/MD). Fails closed: a paste/file this
+    couldn't parse comes back with extracted=False and abstain_reason set,
+    never an exception.
+
+    Attributes:
+        extracted        Whether anything was successfully extracted.
+        confidence        "high"/"medium"/"low", when extracted.
+        abstain_reason    Why nothing was extracted, when extracted is False.
+        raw               Full response — dependent_variable, independent_variables,
+                          method claimed, coefficients, etc.
+    """
+    extracted: bool
+    confidence: Optional[str] = None
+    abstain_reason: Optional[str] = None
+    raw: dict = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        if not self.extracted:
+            return f"ExtractedClaimResult(extracted=False, reason='{self.abstain_reason}')"
+        return f"ExtractedClaimResult(extracted=True, confidence='{self.confidence}')"
+
+
+@dataclass
+class ClaimDiffResult:
+    """
+    Return type for db.qa_audit.diff() — POST /v1/qa-audit/diff. Pure,
+    deterministic comparison of an extracted claim (db.qa_audit.extract())
+    against a completed journey's envelope — no LLM call.
+
+    Attributes:
+        summary     Plain-English verdict.
+        abstained   True if the comparison could not be made at all
+                    (envelope incomplete, claim not extracted).
+        raw         Full response — findings[] (per-dimension agree/disagree).
+    """
+    summary: str
+    abstained: bool = False
+    raw: dict = field(default_factory=dict)
+    _http: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def findings(self):
+        """Per-dimension comparison findings as a DataFrame."""
+        from databubble.tables import rows_to_frame
+
+        return rows_to_frame(self.raw.get("findings"))
+
+    def __repr__(self) -> str:
+        return f"ClaimDiffResult(abstained={self.abstained}, {len(self.raw.get('findings') or [])} findings)"

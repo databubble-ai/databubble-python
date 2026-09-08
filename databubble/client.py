@@ -26,6 +26,8 @@ from databubble.journeys import JourneysClient
 from databubble.model import ModelClient
 from databubble.scorecard import ScorecardClient
 from databubble.segments import SegmentsClient
+from databubble.analysis import AnalysisClient
+from databubble.qa_audit import QaAuditClient
 
 
 DEFAULT_BASE_URL = "https://api.databubble.ai"
@@ -225,6 +227,40 @@ class _HTTPClient:
             self._raise_for_status(e.code, {})
             return None
 
+    def post_bytes(self, path: str, payload: dict) -> bytes:
+        """
+        POST with a JSON body, return the raw response bytes rather than
+        parsing JSON — for routes that hand back a PDF, CSV, or ZIP
+        (POST /v1/export/*, /v1/qa-audit/export, /v1/correlation/export and
+        /v1/forecast/export with format="csv"/"zip"). The GET-only
+        get_bytes() above doesn't cover these — they need a request body.
+        """
+        url = f"{self._base_url}{path}"
+
+        if self._backend == "httpx":
+            response = self._session.post(path, json=payload, timeout=self._timeout)
+            if response.status_code >= 400:
+                self._raise_for_status(
+                    response.status_code,
+                    self._parse_body(response.text, response.status_code),
+                )
+            return response.content
+
+        import urllib.request, urllib.error
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json", **self._headers},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            body = self._parse_body(e.read().decode("utf-8", "replace"), e.code)
+            self._raise_for_status(e.code, body)
+            raise ServerError(f"Unexpected response ({e.code})", e.code, body)
+
     def post_multipart(self, path: str, fields: dict, files) -> dict:
         """
         POST with multipart form data. Returns parsed response dict.
@@ -313,6 +349,8 @@ class DataBubble:
         self.model = ModelClient(self._http)
         self.scorecard = ScorecardClient(self._http)
         self.segments = SegmentsClient(self._http)
+        self.analysis = AnalysisClient(self._http)
+        self.qa_audit = QaAuditClient(self._http)
 
     def close(self):
         self._http.close()

@@ -15,8 +15,9 @@ scoring never needs the platform again once you have the card.
 from __future__ import annotations
 
 from typing import Any
-from databubble.models import ModelCardResult, PredictionResult, ComparisonResult, DriftResult
+from databubble.models import ModelCardResult, PredictionResult, ComparisonResult, DriftResult, SkillResult
 from databubble._scoring_common import extract_ref, artifact_dict, df_to_records
+from databubble.exceptions import SDKUsageError
 
 
 class ModelClient:
@@ -99,6 +100,60 @@ class ModelClient:
         card_dicts = [artifact_dict(c, "db.model.compare", "cards") for c in cards]
         response = self._http.post_json("/v1/model/compare", {"cards": card_dicts, "mode": mode})
         return ComparisonResult(mode=mode, outcome=response.get("outcome", ""), raw=response)
+
+    def interval_calibration(
+        self,
+        card: Any,
+        rows,
+        actuals: list,
+        interval_kind: str = "prediction",
+        nominal: float = 0.95,
+        wilson_conf: float = 0.95,
+    ) -> SkillResult:
+        """
+        Backtest a card's prediction/confidence intervals against a genuine
+        holdout — coverage, calibration curve, and whether the interval
+        widths are honest. Same arg shape as .predict()/.drift() (card + rows,
+        stateless) — the one model_export.py route this client didn't wrap.
+
+        Args:
+            card:           a ModelCardResult (from .export()) or a dict.
+            rows:           a pd.DataFrame the card was NOT fitted on — a real
+                             holdout, or coverage will look optimistic. This
+                             endpoint cannot verify that itself.
+            actuals:        list of true outcome values, same length as rows,
+                             same row order.
+            interval_kind:  "prediction" (pi_lower/pi_upper) or "mean_response"
+                             (ci_lower/ci_upper).
+            nominal:        Target interval coverage, e.g. 0.95 for a 95% interval.
+            wilson_conf:    Confidence level for the Wilson interval around the
+                             observed coverage rate.
+
+        Returns:
+            SkillResult — same shape as db.skills.*, since the platform route
+            wraps the same interval_calibration_skill() that builds one.
+
+        Example:
+            card = db.model.export(result)
+            holdout = new_df.iloc[:50]
+            backtest = db.model.interval_calibration(card, holdout, holdout["sales"].tolist())
+            print(backtest.summary)
+        """
+        from databubble.skills import _parse_skill_result
+
+        card_dict = artifact_dict(card, "db.model.interval_calibration", "card")
+        rows_records = df_to_records(rows, "db.model.interval_calibration")
+        if len(actuals) != len(rows_records):
+            raise SDKUsageError(
+                f"db.model.interval_calibration(): actuals ({len(actuals)}) must have "
+                f"the same length as rows ({len(rows_records)})."
+            )
+        payload = {
+            "card": card_dict, "rows": rows_records, "actuals": actuals,
+            "interval_kind": interval_kind, "nominal": nominal, "wilson_conf": wilson_conf,
+        }
+        response = self._http.post_json("/v1/model/interval-calibration", payload)
+        return _parse_skill_result(response, http=self._http)
 
     def drift(self, card: Any, rows) -> DriftResult:
         """

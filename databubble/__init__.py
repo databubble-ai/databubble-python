@@ -17,6 +17,9 @@ from databubble.models import (
     SkillResult, MemoryResult, ReconciliationResult, JourneyResult,
     ModelCardResult, PredictionResult, ComparisonResult, DriftResult,
     ScorecardResult, ScoreResult, SegmentScorerResult, SegmentScoreResult,
+    EDAResult, PulseResult, ScopeResult, PowerPlanResult, SkillPackResult,
+    CorrelationExportResult, ForecastExportResult,
+    ExtractedClaimResult, ClaimDiffResult,
 )
 from databubble.charts import Chart, ChartSet
 from databubble.exceptions import (
@@ -38,6 +41,15 @@ __all__ = [
     "ScoreResult",
     "SegmentScorerResult",
     "SegmentScoreResult",
+    "EDAResult",
+    "PulseResult",
+    "ScopeResult",
+    "PowerPlanResult",
+    "SkillPackResult",
+    "CorrelationExportResult",
+    "ForecastExportResult",
+    "ExtractedClaimResult",
+    "ClaimDiffResult",
     "Chart",
     "ChartSet",
     "DataBubbleError",

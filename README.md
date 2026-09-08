@@ -1,6 +1,6 @@
 # DataBubble SDK
 
-Statistical Intelligence as a Service. Current version: **0.7.0**.
+Statistical Intelligence as a Service. Current version: **0.8.0**.
 
 A thin, typed client over the DataBubble HTTP API (`/v1/*`) — handles
 authentication (`X-API-Key`), request/response shaping, and session memory.
@@ -60,6 +60,59 @@ mem.save("pos_memory.json")
 | `bivariate` | DataFrame + x= + y= | Relationship analysis, linearity check |
 | `correlation` | DataFrame + x= + y= | Pearson + Spearman, non-linearity flag |
 | `transformations` | Series or DataFrame + column= + transform= | Apply and assess log / sqrt / Box-Cox / reflect transforms |
+| `data_quality` | DataFrame | Exact duplicates, grain-anchored repeats, candidate-key near-misses |
+| `nonlinearity` | DataFrame/Series + column= + outcome= | Functional-form check — is this predictor's relationship linear? |
+| `linear_regression` | DataFrame + outcome= + predictor_cols= | OLS via statsmodels — prerequisite for `oaxaca`/`confounding_remedy` |
+| `confounding_remedy` | DataFrame + outcome=/focal_col=/remedy=/period_col= | Adjust a predictor's effect for a period-tied confound |
+| `oaxaca` | DataFrame + compensation_col=/protected_col=/factor_cols= | Oaxaca-Blinder pay-gap decomposition |
+| `oaxaca_detailed` | Same as `oaxaca` | Oaxaca-Blinder, explained component broken out per factor |
+| `oaxaca_yun_normalized` | Same as `oaxaca` | Oaxaca-Blinder with Yun's normalization |
+
+## Analysis (standalone operations)
+
+`db.analysis.*` and `db.qa_audit.*` — not skills (no session), not journeys
+(no multi-step orchestration), not a portable scoring artifact. Added in
+0.8.0.
+
+```python
+# Full EDA health report
+report = db.analysis.eda(df)
+report.n_flagged_columns
+with open("eda.pdf", "wb") as f:
+    f.write(report.export_pdf())
+
+# Aggregate profiling ("Pulse of Data") — auto roll-ups + anomaly callouts
+pulse = db.analysis.pulse(df)
+pulse.rollups          # DataFrame
+pulse.caveats          # render these wherever pulse.rollups is shown
+
+# Scoping pre-flight — small sample + a question, before full ingestion
+scope = db.analysis.scope(df.sample(200), "Does price affect sales?")
+print(scope.regime, scope.journey_candidates)
+
+# Sample-size / detectable-effect planning — no dataset needed
+plan = db.analysis.power_plan(
+    mode="sample_size", metric_type="continuous",
+    baseline_mean=100, baseline_std=20, mde=5,
+)
+print(plan.interpretation)
+
+# Correlation / forecast exports from a journey result
+result = db.journeys.driver(df, outcome_col="sales", candidate_cols=["price", "promotion"])
+diag = db.analysis.correlation_export(result)
+diag.save("correlation_diagnostic.json")
+
+# Backtest a card's prediction/confidence intervals against a real holdout
+card = db.model.export(result)
+backtest = db.model.interval_calibration(card, holdout_df, holdout_df["sales"].tolist())
+print(backtest.summary)
+
+# "Compare with my analysis" — diff a pasted/uploaded claim against a journey result
+claim = db.qa_audit.extract(text=pasted_regression_summary)
+report = db.qa_audit.diff(claim, result.result)
+with open("comparison.pdf", "wb") as f:
+    f.write(db.qa_audit.export(claim, result.result, report))
+```
 
 ## Journeys
 
@@ -73,8 +126,9 @@ Each returns a `JourneyResult`. From 0.5.0 its primary surface is quantitative
 — `.estimates` (DataFrame), `.coefficients`, `.effects`, `.diagnostics`,
 `.confidence_interval`, `.significant`, `.selected_predictors` — and `print(r)`
 renders a statsmodels-style regression table. The business narrative is still
-there, at `.explain()`. Full reference: `docs/api/sdk/python.md`; upgrade notes:
-`MIGRATION-0.5.md`.
+there, at `.explain()`. `.export_pdf()` / `.export_exec_summary_pdf()` render
+the full walkthrough or a one-page decision-first summary as a PDF (0.8.0).
+Full reference: `docs/api/sdk/python.md`; upgrade notes: `MIGRATION-0.5.md`.
 
 ```python
 # Price elasticity of demand
